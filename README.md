@@ -13,7 +13,7 @@ implentment- in master.go file
 
 -=-=-=-=-=-=-=-=-=-=-=--=-=-=-=--
 Setup:
-Get github.com/mattn/go-sqlite3
+ GO get github.com/mattn/go-sqlite3
 Go build 
 Go init
 

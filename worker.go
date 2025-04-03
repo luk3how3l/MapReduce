@@ -103,6 +103,14 @@ func (c Client) Reduce(key string, values <-chan string, output chan<- Pair) err
 	return nil
 }
 
+func (task *MapTask) Process(tempdir string, client Interface) error {
+	return nil
+}
+
+func (task *ReduceTask) Process(tempdir string, client Interface) error {
+	return nil
+}
+
 func main() {
 	m := 10
 	r := 5
