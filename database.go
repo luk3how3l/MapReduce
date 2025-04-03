@@ -155,6 +155,7 @@ func mergeDatabases(urls []string, path string, temp string) (*sql.DB, error) {
 	return db, nil
 }
 
+// This function takes a URL and a pathname, and stores the file it downloads from the URL at the given location
 func download(url, path string) error {
 	// issue a GET request to retrieve a file
 	res, err := http.Get(url)
@@ -182,6 +183,7 @@ func download(url, path string) error {
 	return nil
 }
 
+// This function takes an open database (the output file) and the pathname of another database (the input file) and merges the input file into the output file
 func gatherInto(db *sql.DB, path string) error {
 	// attach the new file to the open database and merge it in
 	if _, err := db.Exec("attach ? as merge", path); err != nil {

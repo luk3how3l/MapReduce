@@ -12,6 +12,15 @@ import (
 	"unicode"
 )
 
+/* worker notes
+A worker node needs to do the following in a loop:
+
+Start an HTTP server to serve intermediate data files to other workers and back to the master.
+Request a job from the master.
+Process each job using the code from part 2.
+Shut down and clean up when finished.
+*/
+
 type MapTask struct {
 	M, R       int    // total number of map and reduce tasks
 	N          int    // map task number, 0-based
