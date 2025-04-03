@@ -104,6 +104,66 @@ func (c Client) Reduce(key string, values <-chan string, output chan<- Pair) err
 }
 
 func (task *MapTask) Process(tempdir string, client Interface) error {
+	//Get inputfile name and make url we need to get from host
+	inputFile := mapInputFile(task.M)
+	fmt.Print(inputFile)
+	url := makeURL(task.SourceHost, inputFile)
+	inputDir := filepath.Join(tempdir, inputFile)
+	
+	if err := download(url, inputDir); err != nil {
+		return fmt.Errorf("failed to download map source file: %v", err)
+	}
+	if db, err := openDatabase(inputDir); err != nil {
+		return fmt.Errorf("failed to open source file: %v", err)
+	}
+
+	for i := 0; i < task.R; i++ {
+		outputPath := filepath.Join(tempdir, mapOutputFile(task.M, i))
+		_, err := os.Create(outputPath); err != nil {
+			return fmt.Errorf("failed to create output file: %v", err)
+		}
+	}
+
+	rows, err := db.Query("select key, value from pairs")
+	if err != nil {
+		log.Printf("error getting key values from db %v", err)
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var key, value string
+		if err := rows.Scan(&key, &value); err != nil {
+			log.Printf("error scanning row value: %v", err)
+			return err
+		}
+
+		outputChan := make(chan Pair)
+
+		go func() {
+			client.Map(key, value, outputChan)
+			close(outputChan)
+		}()
+
+		go func() {
+			for pair := range outputChan {
+				hasher := fnv.New32()
+				hasher.Write([]byte(pair.Key))
+				r := int(hasher.Sum32() % uint32(task.R))
+
+				outputFilePath = mapOutputFile(task.M, r)
+				conn, err := sql.Open(outputFilePath); err != nil {
+					log.Printf("error opening file: %v", err)
+					return err
+				}
+
+				_, err := conn.Exec("INSERT INTO pairs (key, value) VALUES (?, ?)", pair.Key, pair.Value)
+				if err != nil {
+					return fmt.Errorf("failed to insert pair into database: %v", err)
+				}
+			}
+		}()
+	}
 	return nil
 }
 
@@ -146,6 +206,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Listen error on address %s: %v", myAddress, err)
 	}
+	//I think that this takes a tcp connection and converts it into a http request
 	go func() {
 		if err := http.Serve(listener, nil); err != nil {
 			log.Fatalf("Serve error: %v", err)
