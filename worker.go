@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"sync"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -107,14 +108,17 @@ func (c Client) Reduce(key string, values <-chan string, output chan<- Pair) err
 }
 
 func (task *MapTask) Process(tempdir string, client Interface) error {
+	//use mapInputFile to get the name of the file based on the task number
 	inputFile := mapInputFile(task.N)
 	url := makeURL(task.SourceHost, inputFile)
 	inputPath := filepath.Join(tempdir, inputFile)
 
+	//Downloads file from master
 	if err := download(url, inputPath); err != nil {
 		return fmt.Errorf("failed to download map source file: %v", err)
 	}
 
+	//opens downloaded file
 	db, err := openDatabase(inputPath)
 	if err != nil {
 		return fmt.Errorf("failed to open source file: %v", err)
@@ -138,27 +142,42 @@ func (task *MapTask) Process(tempdir string, client Interface) error {
 	defer rows.Close()
 
 	for rows.Next() {
+		//gets next key value pair
 		var key, value string
 		if err := rows.Scan(&key, &value); err != nil {
 			return fmt.Errorf("error scanning row value: %v", err)
 		}
 
 		outputChan := make(chan Pair)
+		var wg sync.WaitGroup
+		wg.Add(2)
+
+		// Background goroutine to insert pairs into corresponding db
 		go func() {
-			client.Map(key, value, outputChan)
-			close(outputChan)
+			defer wg.Done()
+			for pair := range outputChan {
+				hasher := fnv.New32()
+				hasher.Write([]byte(pair.Key))
+				r := int(hasher.Sum32() % uint32(task.R))
+
+				_, err := outputDBs[r].Exec("INSERT INTO pairs (key, value) VALUES (?, ?)", pair.Key, pair.Value)
+				if err != nil {
+					log.Printf("failed to insert pair (%s, %s): %v", pair.Key, pair.Value, err)
+				}
+			}
 		}()
 
-		for pair := range outputChan {
-			hasher := fnv.New32()
-			hasher.Write([]byte(pair.Key))
-			r := int(hasher.Sum32() % uint32(task.R))
-
-			_, err := outputDBs[r].Exec("INSERT INTO pairs (key, value) VALUES (?, ?)", pair.Key, pair.Value)
+		// Call client.map on each key value pair
+		go func(k, v string) {
+			defer wg.Done()
+			err := client.Map(k, v, outputChan)
 			if err != nil {
-				return fmt.Errorf("failed to insert pair into output database: %v", err)
+				log.Printf("client.Map error on key=%s: %v", k, err)
 			}
-		}
+			close(outputChan)
+		}(key, value)
+
+		wg.Wait()
 	}
 
 	if err := rows.Err(); err != nil {
