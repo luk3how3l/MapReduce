@@ -12,6 +12,7 @@ import (
 	"strings"
 	"unicode"
 	"sync"
+	"hash/fnv"
 
 	_ "github.com/mattn/go-sqlite3"
 )
