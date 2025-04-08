@@ -110,9 +110,9 @@ func (c Client) Reduce(key string, values <-chan string, output chan<- Pair) err
 
 func (task *MapTask) Process(tempdir string, client Interface) error {
 	//use mapInputFile to get the name of the file based on the task number
-	inputFile := mapInputFile(task.N)
+	inputFile := mapSourceFile(task.N)
 	url := makeURL(task.SourceHost, inputFile)
-	inputPath := filepath.Join(tempdir, inputFile)
+	inputPath := filepath.Join(tempdir, mapInputFile(task.N))
 
 	//Downloads file from master
 	if err := download(url, inputPath); err != nil {
@@ -189,6 +189,109 @@ func (task *MapTask) Process(tempdir string, client Interface) error {
 }
 
 func (task *ReduceTask) Process(tempdir string, client Interface) error {
+	var url []string
+	tempPath := filepath.Join(tempdir, reduceTempFile(task.N))
+	inputPath := filepath.Join(tempdir, reduceInputFile(task.N))
+	outputPath := filepath.Join(tempdir, reduceOutputFile(task.N))
+	for i:=0; i<task.M; i++{
+		mapOutputLoc := mapOutputFile(i, task.N)
+		url = append(url, makeURL(task.SourceHosts[i], mapOutputLoc))
+	}
+	mergeDatabases(url, inputPath, tempPath)
+
+	createDatabase(outputPath)
+
+	outputDB, err := sql.Open("sqlite3", outputPath)
+	if err != nil {
+		return fmt.Errorf("failed to open output database: %v", err)
+	}
+	defer outputDB.Close()
+
+	db, err := openDatabase(inputPath)
+	if err != nil {
+		return fmt.Errorf("failed to open source file: %v", err)
+	}
+	defer db.Close()
+
+	rows, err := db.Query("select key, value from pairs order by key, value")
+	if err != nil {
+		return fmt.Errorf("error querying database: %v", err)
+	}
+	defer rows.Close()
+
+	currentKey := ""
+	valueChan := make(chan string)
+	outputChan := make(chan Pair)
+	done := make(chan struct{})
+
+	for rows.Next() {	
+		//gets next key value pair
+		var key, value string
+		if err := rows.Scan(&key, &value); err != nil {
+			return fmt.Errorf("error scanning row value: %v", err)
+		}
+
+		if currentKey == "" {
+
+			currentKey = key
+			valueChan = make(chan string)
+			outputChan = make(chan Pair)
+			done = make(chan struct{})
+
+			go func() {
+				for pair := range outputChan {	
+					_, err := outputDB.Exec("INSERT INTO pairs (key, value) VALUES (?, ?)", pair.Key, pair.Value)
+					if err != nil {
+						log.Printf("failed to insert pair (%s, %s): %v", pair.Key, pair.Value, err)
+					}
+				}
+			}()
+	
+			// Call client.reduce on each key value pair
+			go func() {
+				err := client.Reduce(currentKey, valueChan, outputChan)
+				if err != nil {
+					log.Printf("client.Map error on key=%s: %v", currentKey, err)
+				}
+				close(outputChan)
+			}()
+		} else if key != currentKey {
+			close(valueChan)
+			<-done
+
+			currentKey = key
+			valueChan = make(chan string)
+			outputChan = make(chan Pair)
+			done = make(chan struct{})
+
+			go func() {
+				for pair := range outputChan {	
+					_, err := outputDB.Exec("INSERT INTO pairs (key, value) VALUES (?, ?)", pair.Key, pair.Value)
+					if err != nil {
+						log.Printf("failed to insert pair (%s, %s): %v", pair.Key, pair.Value, err)
+					}
+				}
+			}()
+	
+			// Call client.reduce on each key value pair
+			go func() {
+				err := client.Reduce(currentKey, valueChan, outputChan)		
+				if err != nil {
+					log.Printf("client.Map error on key=%s: %v", currentKey, err)
+				}
+				close(outputChan)
+			}()
+		}
+
+		valueChan <- value
+	}
+	if valueChan != nil {
+		close(valueChan)
+		<-done
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("error iterating through rows: %v", err)
+	}
 	return nil
 }
 
