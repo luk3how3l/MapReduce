@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
-	"sync"
 	"hash/fnv"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -126,14 +125,15 @@ func (task *MapTask) Process(tempdir string, client Interface) error {
 	}
 	defer db.Close()
 
-	outputDBs := make([]*sql.DB, task.R)
+	//Creating output files
+	var outputDBs []string
 	for i := 0; i < task.R; i++ {
 		outputPath := filepath.Join(tempdir, mapOutputFile(task.N, i))
-		outputDBs[i], err = sql.Open("sqlite3", outputPath)
+		_, err := createDatabase(outputPath)
+		outputDBs = append(outputDBs, outputPath)
 		if err != nil {
-			return fmt.Errorf("failed to open output database %s: %v", outputPath, err)
+			return fmt.Errorf("failed to create output database %s: %v", outputPath, err)
 		}
-		defer outputDBs[i].Close()
 	}
 
 	rows, err := db.Query("SELECT key, value FROM pairs")
@@ -150,41 +150,41 @@ func (task *MapTask) Process(tempdir string, client Interface) error {
 		}
 
 		outputChan := make(chan Pair)
-		var wg sync.WaitGroup
-		wg.Add(2)
 
 		// Background goroutine to insert pairs into corresponding db
 		go func() {
-			defer wg.Done()
 			for pair := range outputChan {
 				hasher := fnv.New32()
 				hasher.Write([]byte(pair.Key))
 				r := int(hasher.Sum32() % uint32(task.R))
 
-				_, err := outputDBs[r].Exec("INSERT INTO pairs (key, value) VALUES (?, ?)", pair.Key, pair.Value)
+				database, err := openDatabase(outputDBs[r])
 				if err != nil {
-					log.Printf("failed to insert pair (%s, %s): %v", pair.Key, pair.Value, err)
+					log.Printf("failed to open output database %s: %v", outputDBs[r], err)
+					continue
 				}
+				defer database.Close()
+				_ , err = database.Exec("INSERT INTO pairs (key, value) VALUES (?, ?)", pair.Key, pair.Value)
+				if err != nil {
+                    log.Printf("failed to insert pair (%s, %s): %v", pair.Key, pair.Value, err)
+                }
 			}
 		}()
 
 		// Call client.map on each key value pair
 		go func(k, v string) {
-			defer wg.Done()
 			err := client.Map(k, v, outputChan)
 			if err != nil {
 				log.Printf("client.Map error on key=%s: %v", k, err)
 			}
-			close(outputChan)
 		}(key, value)
-
-		wg.Wait()
+		
 	}
 
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("error iterating through rows: %v", err)
 	}
-
+	fmt.Printf("Processed task %v\n", task.N)
 	return nil
 }
 
@@ -300,7 +300,7 @@ func main() {
 	m := 10
 	r := 5
 	source := "source.db"
-	//target := "target.db"
+	target := "target.db"
 	tmp := os.TempDir()
 
 	tempdir := filepath.Join(tmp, fmt.Sprintf("mapreduce.%d", os.Getpid()))
@@ -373,6 +373,7 @@ func main() {
 			reduce.SourceHosts[i] = myAddress
 		}
 	}
+	fmt.Printf("MapTask process complete\n")
 
 	// process the reduce tasks
 	for i, task := range reduceTasks {
@@ -380,6 +381,22 @@ func main() {
 			log.Fatalf("processing reduce task %d: %v", i, err)
 		}
 	}
+	fmt.Printf("ReduceTask process complete\n")
 
 	// gather outputs into final target.db file
+	var reduceOutputPaths []string
+	for i := 0; i < r; i++ {
+		reduceOutputPaths = append(reduceOutputPaths, filepath.Join(tempdir, reduceOutputFile(i)))
+	}
+
+	targetPath := filepath.Join(".", target)
+	tempTarget := filepath.Join(tempdir, "target-tmp.db")
+
+	outputDB, err := mergeDatabases(reduceOutputPaths, targetPath, tempTarget)
+	if err != nil {
+		log.Fatalf("failed to merge reduce outputs into target.db: %v", err)
+	}
+	defer outputDB.Close()
+
+	log.Printf("Successfully wrote final output to %s", targetPath)
 }
