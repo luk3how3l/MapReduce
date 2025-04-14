@@ -266,6 +266,8 @@ func (task *ReduceTask) Process(tempdir string, client Interface) error {
 			}()
 
 			//this else if is the problem... here.
+
+			// wheres the else if key == current key??
 		} else if key != currentKey {
 			//why do we close the Value chan?
 			close(valueChan)
