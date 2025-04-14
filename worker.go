@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"net"
 	"net/http"
@@ -11,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
-	"hash/fnv"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -150,7 +150,8 @@ func (task *MapTask) Process(tempdir string, client Interface) error {
 		}
 
 		outputChan := make(chan Pair)
-
+		imgood := make(chan bool)
+		//The read parts usually fast
 		// Background goroutine to insert pairs into corresponding db
 		go func() {
 			for pair := range outputChan {
@@ -161,24 +162,29 @@ func (task *MapTask) Process(tempdir string, client Interface) error {
 				database, err := openDatabase(outputDBs[r])
 				if err != nil {
 					log.Printf("failed to open output database %s: %v", outputDBs[r], err)
+					database.Close()
 					continue
 				}
 				defer database.Close()
-				_ , err = database.Exec("INSERT INTO pairs (key, value) VALUES (?, ?)", pair.Key, pair.Value)
+
+				_, err = database.Exec("INSERT INTO pairs (key, value) VALUES (?, ?)", pair.Key, pair.Value)
 				if err != nil {
-                    log.Printf("failed to insert pair (%s, %s): %v", pair.Key, pair.Value, err)
-                }
+					log.Printf("failed to insert pair (%s, %s): %v", pair.Key, pair.Value, err)
+				}
 			}
+			//signaling it's done writing
+			imgood <- true
 		}()
 
 		// Call client.map on each key value pair
+		//The write part/ slow
 		go func(k, v string) {
 			err := client.Map(k, v, outputChan)
 			if err != nil {
 				log.Printf("client.Map error on key=%s: %v", k, err)
 			}
 		}(key, value)
-		
+		<-imgood //the magic <-
 	}
 
 	if err := rows.Err(); err != nil {
@@ -193,7 +199,7 @@ func (task *ReduceTask) Process(tempdir string, client Interface) error {
 	tempPath := filepath.Join(tempdir, reduceTempFile(task.N))
 	inputPath := filepath.Join(tempdir, reduceInputFile(task.N))
 	outputPath := filepath.Join(tempdir, reduceOutputFile(task.N))
-	for i:=0; i<task.M; i++{
+	for i := 0; i < task.M; i++ {
 		mapOutputLoc := mapOutputFile(i, task.N)
 		url = append(url, makeURL(task.SourceHosts[i], mapOutputLoc))
 	}
@@ -219,17 +225,20 @@ func (task *ReduceTask) Process(tempdir string, client Interface) error {
 	}
 	defer rows.Close()
 
+	//we have 3 of these channels/ we have channels within channels and go routines
 	currentKey := ""
 	valueChan := make(chan string)
 	outputChan := make(chan Pair)
 	done := make(chan struct{})
 
-	for rows.Next() {	
+	for rows.Next() {
 		//gets next key value pair
 		var key, value string
 		if err := rows.Scan(&key, &value); err != nil {
 			return fmt.Errorf("error scanning row value: %v", err)
 		}
+
+		fmt.Printf("ReduceTask process start\n")
 
 		if currentKey == "" {
 
@@ -239,23 +248,26 @@ func (task *ReduceTask) Process(tempdir string, client Interface) error {
 			done = make(chan struct{})
 
 			go func() {
-				for pair := range outputChan {	
+				for pair := range outputChan {
 					_, err := outputDB.Exec("INSERT INTO pairs (key, value) VALUES (?, ?)", pair.Key, pair.Value)
 					if err != nil {
 						log.Printf("failed to insert pair (%s, %s): %v", pair.Key, pair.Value, err)
 					}
 				}
 			}()
-	
+
 			// Call client.reduce on each key value pair
 			go func() {
 				err := client.Reduce(currentKey, valueChan, outputChan)
 				if err != nil {
 					log.Printf("client.Map error on key=%s: %v", currentKey, err)
 				}
-				close(outputChan)
+				//close(outputChan) not needed
 			}()
+
+			//this else if is the problem... here.
 		} else if key != currentKey {
+			//why do we close the Value chan?
 			close(valueChan)
 			<-done
 
@@ -265,23 +277,29 @@ func (task *ReduceTask) Process(tempdir string, client Interface) error {
 			done = make(chan struct{})
 
 			go func() {
-				for pair := range outputChan {	
+				// i don't think we need to fill output. Reduce func does that.
+				// We need to fill up valueChan
+				//fill the output channel with pair
+				for pair := range outputChan {
 					_, err := outputDB.Exec("INSERT INTO pairs (key, value) VALUES (?, ?)", pair.Key, pair.Value)
 					if err != nil {
 						log.Printf("failed to insert pair (%s, %s): %v", pair.Key, pair.Value, err)
 					}
 				}
 			}()
-	
+			fmt.Printf("ReduceTask process inner loop: finish filling output chan\n")
+
 			// Call client.reduce on each key value pair
 			go func() {
-				err := client.Reduce(currentKey, valueChan, outputChan)		
+				//the reduce fills up output function and closes the output function
+				err := client.Reduce(currentKey, valueChan, outputChan)
 				if err != nil {
 					log.Printf("client.Map error on key=%s: %v", currentKey, err)
 				}
-				close(outputChan)
 			}()
 		}
+
+		fmt.Printf("ReduceTask process inner loop: checking the the valueChan....\n")
 
 		valueChan <- value
 	}

@@ -18,12 +18,24 @@ Go build
 Go init
 
 Goal for Part 1:
-    Get Map Task
+    Get Map Task -DONE
     Map Handler, Reduce Handler
     MapTask: (should download select with SQL?)
+    ReduceTask needs to be finished.
 
+    We need to go step for step on how the channels are working. and track the varaibles.
+
+    
     Engineer the route (channel) how Data goes thru Map Worker to Backend for consume and storing.
 
 End Goal:
     Have a functional MApReduce library to use on a wikipedia lookup or word count on a page certian or so
 
+
+Notes from Russ:
+    write to output channel for waiting. we have to many go routines. 
+    open once like merge database. 
+
+    testing purpose: 
+
+    go run worker.go database.go 2>&1 | less
