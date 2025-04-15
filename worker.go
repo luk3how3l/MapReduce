@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
-	"runtime"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -202,8 +201,8 @@ func (task *MapTask) Process(tempdir string, client Interface) error {
 			return fmt.Errorf("error scanning row value: %v", err)
 		}
 
-		outputChan := make(chan Pair)
-		imgood := make(chan bool, 5)
+		outputChan := make(chan Pair, 100)
+		imgood := make(chan bool, 100)
 		//The read parts usually fast
 		// Background goroutine to insert pairs into corresponding db
 		go func() {
@@ -288,8 +287,8 @@ func (task *ReduceTask) Process(tempdir string, client Interface) error {
 	defer rows.Close()
 
 	// Pipe SQL rows into rawPairs channel
-	rawPairs := make(chan Pair)
-	done := make(chan bool, 5)
+	rawPairs := make(chan Pair, 100)
+	done := make(chan bool, 100)
 
 	go func() {
 		defer close(rawPairs)
@@ -305,7 +304,7 @@ func (task *ReduceTask) Process(tempdir string, client Interface) error {
 
 	// Group by key and process each group
 	for keyGroup := range groupby(rawPairs) {
-		outputChan := make(chan Pair)
+		outputChan := make(chan Pair, 100)
 		// Launch writer goroutine
 		go func(key string, out <-chan Pair) {
 			for pair := range out {
@@ -337,8 +336,8 @@ func (task *ReduceTask) Process(tempdir string, client Interface) error {
 
 func main() {
 	fmt.Println("Runs main")
-	m := 5
-	r := 2
+	m := 10
+	r := 5
 	source := "source.db"
 	target := "target.db"
 	tmp := os.TempDir()
