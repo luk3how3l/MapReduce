@@ -250,41 +250,43 @@ func (task *ReduceTask) Process(tempdir string, client Interface) error {
 	tempPath := filepath.Join(tempdir, reduceTempFile(task.N))
 	inputPath := filepath.Join(tempdir, reduceInputFile(task.N))
 	outputPath := filepath.Join(tempdir, reduceOutputFile(task.N))
+
+	// Build URLs for map output files
 	for i := 0; i < task.M; i++ {
 		mapOutputLoc := mapOutputFile(i, task.N)
 		url = append(url, makeURL(task.SourceHosts[i], mapOutputLoc))
 	}
-	mergeDatabases(url, inputPath, tempPath)
 
-	createDatabase(outputPath)
+	// Download and merge map outputs
+	if _, err := mergeDatabases(url, inputPath, tempPath); err != nil {
+		return fmt.Errorf("merge failed: %v", err)
+	}
 
+	// Create and open output DB
+	if _, err := createDatabase(outputPath); err != nil {
+		return fmt.Errorf("create output db failed: %v", err)
+	}
 	outputDB, err := sql.Open("sqlite3", outputPath)
 	if err != nil {
-		return fmt.Errorf("failed to open output database: %v", err)
+		return fmt.Errorf("failed to open output db: %v", err)
 	}
 	defer outputDB.Close()
 
+	// Open input DB and read rows
 	db, err := openDatabase(inputPath)
 	if err != nil {
-		return fmt.Errorf("failed to open source file: %v", err)
+		return fmt.Errorf("failed to open input db: %v", err)
 	}
 	defer db.Close()
 
-	rows, err := db.Query("select key, value from pairs order by key, value")
+	rows, err := db.Query("SELECT key, value FROM pairs ORDER BY key, value")
 	if err != nil {
-		return fmt.Errorf("error querying database: %v", err)
+		return fmt.Errorf("query error: %v", err)
 	}
 	defer rows.Close()
 
-	//we have 3 of these channels/ we have channels within channels and go routines
-	//valueChan := make(chan string)
-	outputChan := make(chan Pair)
-	done := make(chan struct{})
+	// Pipe SQL rows into rawPairs channel
 	rawPairs := make(chan Pair)
-
-	// code from chat hahah
-	// Step 3: Create a channel of Pairs and feed the rows into it
-
 	go func() {
 		defer close(rawPairs)
 		for rows.Next() {
@@ -295,40 +297,31 @@ func (task *ReduceTask) Process(tempdir string, client Interface) error {
 			}
 			rawPairs <- Pair{Key: k, Value: v}
 		}
-
 	}()
 
-	// Step 4: Group the rawPairs using groupby
+	// Group by key and process each group
 	for keyGroup := range groupby(rawPairs) {
-		// Step 5: Call Reduce
+		outputChan := make(chan Pair)
+		// Launch writer goroutine
+		go func(key string, out <-chan Pair) {
+			for pair := range out {
+				_, err := outputDB.Exec(`INSERT INTO pairs (key, value) VALUES (?, ?)`, pair.Key, pair.Value)
+				if err != nil {
+					log.Printf("insert error for key=%s: %v", pair.Key, err)
+				}
+			}
+		}(keyGroup.key, outputChan)
+
+		// Run reduce in-place (can be goroutine if needed)
 		err := client.Reduce(keyGroup.key, keyGroup.values, outputChan)
 		if err != nil {
-			log.Printf("client.Reduce error on key=%s: %v", keyGroup.key, err)
-			continue
+			log.Printf("Reduce error on key=%s: %v", keyGroup.key, err)
 		}
-
-		// Step 6: Insert the result into the output database
-		//maybe need an go rotine
-		go func() {
-			_, err = outputDB.Exec(`INSERT INTO pairs (key, value) VALUES (?, ?)`, keyGroup.key, keyGroup.values)
-			if err != nil {
-				log.Printf("failed to insert result for key=%s: %v", keyGroup.key, err)
-			}
-			done <- struct{}{}
-		}()
-		<-done
 	}
 
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("error iterating through merged rows: %v", err)
+		return fmt.Errorf("row iteration error: %v", err)
 	}
-	// needed
-	//if valueChan != nil {
-	//	close(valueChan)
-	//	<-done
-	//}
-
-	fmt.Printf("ReduceTask process inner loop: checking the the valueChan....\n")
 
 	fmt.Printf("Processed reduce task %v\n", task.N)
 	return nil
