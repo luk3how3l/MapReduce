@@ -42,6 +42,11 @@ type Pair struct {
 	Value string
 }
 
+type KeyGroup struct {
+	key    string
+	values <-chan string
+}
+
 type Interface interface {
 	Map(key, value string, output chan<- Pair) error
 	Reduce(key string, values <-chan string, output chan<- Pair) error
@@ -105,6 +110,52 @@ func (c Client) Reduce(key string, values <-chan string, output chan<- Pair) err
 	p := Pair{Key: key, Value: strconv.Itoa(count)}
 	output <- p
 	return nil
+}
+
+func groupby(rawPairs <-chan Pair) <-chan KeyGroup {
+	// Create the output channel for KeyGroups
+	groups := make(chan KeyGroup)
+
+	// Start a goroutine to process the incoming pairs
+	go func() {
+		// Ensure the groups channel gets closed when we're done
+		defer close(groups)
+
+		var currentKey string
+		var valuesChan chan string
+
+		for pair := range rawPairs {
+			// If this is a new key or the first key
+			if pair.Key != currentKey || valuesChan == nil {
+				// Close the previous values channel if it exists
+				if valuesChan != nil {
+					close(valuesChan)
+				}
+
+				// Create a new values channel for this key
+				valuesChan = make(chan string)
+
+				// Update the current key
+				currentKey = pair.Key
+
+				// Send a new KeyGroup with this key and values channel
+				groups <- KeyGroup{
+					key:    currentKey,
+					values: valuesChan,
+				}
+			}
+
+			// Send the value to the current values channel
+			valuesChan <- pair.Value
+		}
+
+		// Close the final values channel when rawPairs is closed
+		if valuesChan != nil {
+			close(valuesChan)
+		}
+	}()
+
+	return groups
 }
 
 func (task *MapTask) Process(tempdir string, client Interface) error {
@@ -226,94 +277,64 @@ func (task *ReduceTask) Process(tempdir string, client Interface) error {
 	defer rows.Close()
 
 	//we have 3 of these channels/ we have channels within channels and go routines
-	currentKey := ""
-	valueChan := make(chan string)
+	//valueChan := make(chan string)
 	outputChan := make(chan Pair)
 	done := make(chan struct{})
+	rawPairs := make(chan Pair)
 
-	for rows.Next() {
-		//gets next key value pair
-		var key, value string
-		if err := rows.Scan(&key, &value); err != nil {
-			return fmt.Errorf("error scanning row value: %v", err)
+	// code from chat hahah
+	// Step 3: Create a channel of Pairs and feed the rows into it
+
+	go func() {
+		defer close(rawPairs)
+		for rows.Next() {
+			var k, v string
+			if err := rows.Scan(&k, &v); err != nil {
+				log.Printf("row scan error: %v", err)
+				continue
+			}
+			rawPairs <- Pair{Key: k, Value: v}
 		}
 
-		fmt.Printf("ReduceTask process start\n")
+	}()
 
-		if currentKey == "" {
-
-			currentKey = key
-			valueChan = make(chan string)
-			outputChan = make(chan Pair)
-			done = make(chan struct{})
-
-			go func() {
-				for pair := range outputChan {
-					_, err := outputDB.Exec("INSERT INTO pairs (key, value) VALUES (?, ?)", pair.Key, pair.Value)
-					if err != nil {
-						log.Printf("failed to insert pair (%s, %s): %v", pair.Key, pair.Value, err)
-					}
-				}
-			}()
-
-			// Call client.reduce on each key value pair
-			go func() {
-				err := client.Reduce(currentKey, valueChan, outputChan)
-				if err != nil {
-					log.Printf("client.Map error on key=%s: %v", currentKey, err)
-				}
-				//close(outputChan) not needed
-			}()
-
-			//this else if is the problem... here.
-
-			// wheres the else if key == current key??
-		} else if key != currentKey {
-			//why do we close the Value chan?
-			close(valueChan)
-			<-done
-
-			currentKey = key
-			valueChan = make(chan string)
-			outputChan = make(chan Pair)
-			done = make(chan struct{})
-
-			go func() {
-				// i don't think we need to fill output. Reduce func does that.
-				// We need to fill up valueChan
-				//fill the output channel with pair
-				for pair := range outputChan {
-					_, err := outputDB.Exec("INSERT INTO pairs (key, value) VALUES (?, ?)", pair.Key, pair.Value)
-					if err != nil {
-						log.Printf("failed to insert pair (%s, %s): %v", pair.Key, pair.Value, err)
-					}
-				}
-			}()
-			fmt.Printf("ReduceTask process inner loop: finish filling output chan\n")
-
-			// Call client.reduce on each key value pair
-			go func() {
-				//the reduce fills up output function and closes the output function
-				err := client.Reduce(currentKey, valueChan, outputChan)
-				if err != nil {
-					log.Printf("client.Map error on key=%s: %v", currentKey, err)
-				}
-			}()
+	// Step 4: Group the rawPairs using groupby
+	for keyGroup := range groupby(rawPairs) {
+		// Step 5: Call Reduce
+		err := client.Reduce(keyGroup.key, keyGroup.values, outputChan)
+		if err != nil {
+			log.Printf("client.Reduce error on key=%s: %v", keyGroup.key, err)
+			continue
 		}
 
-		fmt.Printf("ReduceTask process inner loop: checking the the valueChan....\n")
-
-		valueChan <- value
-	}
-	if valueChan != nil {
-		close(valueChan)
+		// Step 6: Insert the result into the output database
+		//maybe need an go rotine
+		go func() {
+			_, err = outputDB.Exec(`INSERT INTO pairs (key, value) VALUES (?, ?)`, keyGroup.key, keyGroup.values)
+			if err != nil {
+				log.Printf("failed to insert result for key=%s: %v", keyGroup.key, err)
+			}
+			done <- struct{}{}
+		}()
 		<-done
 	}
+
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("error iterating through rows: %v", err)
+		return fmt.Errorf("error iterating through merged rows: %v", err)
 	}
+	// needed
+	//if valueChan != nil {
+	//	close(valueChan)
+	//	<-done
+	//}
+
+	fmt.Printf("ReduceTask process inner loop: checking the the valueChan....\n")
+
+	fmt.Printf("Processed reduce task %v\n", task.N)
 	return nil
 }
+
+//end of chat code
 
 func main() {
 	fmt.Println("Runs main")

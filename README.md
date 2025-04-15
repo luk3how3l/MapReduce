@@ -25,7 +25,7 @@ Goal for Part 1:
 
     We need to go step for step on how the channels are working. and track the varaibles.
 
-    
+
     Engineer the route (channel) how Data goes thru Map Worker to Backend for consume and storing.
 
 End Goal:
@@ -36,6 +36,78 @@ Notes from Russ:
     write to output channel for waiting. we have to many go routines. 
     open once like merge database. 
 
+
+
+    maek a group channel layout 
+    group channel is key- channel of pairs
+
+    you it to group all key words like "cats" 
     testing purpose: 
 
     go run worker.go database.go 2>&1 | less
+
+
+
+
+
+    
+		if currentKey == "" {
+
+			currentKey = key
+			valueChan = make(chan string)
+			outputChan = make(chan Pair)
+			done = make(chan struct{})
+
+			go func() {
+				for pair := range outputChan {
+					_, err := outputDB.Exec("INSERT INTO pairs (key, value) VALUES (?, ?)", pair.Key, pair.Value)
+					if err != nil {
+						log.Printf("failed to insert pair (%s, %s): %v", pair.Key, pair.Value, err)
+					}
+				}
+			}()
+
+			// Call client.reduce on each key value pair
+			go func() {
+				err := client.Reduce(currentKey, valueChan, outputChan)
+				if err != nil {
+					log.Printf("client.Map error on key=%s: %v", currentKey, err)
+				}
+				//close(outputChan) not needed
+			}()
+
+			//this else if is the problem... here.
+
+			// wheres the else if key == current key??
+		} else if key != currentKey {
+			//why do we close the Value chan?
+			close(valueChan)
+			<-done
+
+			currentKey = key
+			valueChan = make(chan string)
+			outputChan = make(chan Pair)
+			done = make(chan struct{})
+
+			go func() {
+				// i don't think we need to fill output. Reduce func does that.
+				// We need to fill up valueChan
+				//fill the output channel with pair
+				for pair := range outputChan {
+					_, err := outputDB.Exec("INSERT INTO pairs (key, value) VALUES (?, ?)", pair.Key, pair.Value)
+					if err != nil {
+						log.Printf("failed to insert pair (%s, %s): %v", pair.Key, pair.Value, err)
+					}
+				}
+			}()
+			fmt.Printf("ReduceTask process inner loop: finish filling output chan\n")
+
+			// Call client.reduce on each key value pair
+			go func() {
+				//the reduce fills up output function and closes the output function
+				err := client.Reduce(currentKey, valueChan, outputChan)
+				if err != nil {
+					log.Printf("client.Map error on key=%s: %v", currentKey, err)
+				}
+			}()
+		}
