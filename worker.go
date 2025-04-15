@@ -287,6 +287,8 @@ func (task *ReduceTask) Process(tempdir string, client Interface) error {
 
 	// Pipe SQL rows into rawPairs channel
 	rawPairs := make(chan Pair)
+	done := make(chan bool)
+
 	go func() {
 		defer close(rawPairs)
 		for rows.Next() {
@@ -310,13 +312,17 @@ func (task *ReduceTask) Process(tempdir string, client Interface) error {
 					log.Printf("insert error for key=%s: %v", pair.Key, err)
 				}
 			}
+			done <- true
 		}(keyGroup.key, outputChan)
 
 		// Run reduce in-place (can be goroutine if needed)
-		err := client.Reduce(keyGroup.key, keyGroup.values, outputChan)
-		if err != nil {
-			log.Printf("Reduce error on key=%s: %v", keyGroup.key, err)
-		}
+		go func() {
+			err := client.Reduce(keyGroup.key, keyGroup.values, outputChan)
+			if err != nil {
+				log.Printf("Reduce error on key=%s: %v", keyGroup.key, err)
+			}
+		}()
+		<-done
 	}
 
 	if err := rows.Err(); err != nil {
@@ -326,8 +332,6 @@ func (task *ReduceTask) Process(tempdir string, client Interface) error {
 	fmt.Printf("Processed reduce task %v\n", task.N)
 	return nil
 }
-
-//end of chat code
 
 func main() {
 	fmt.Println("Runs main")
