@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"runtime"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -335,11 +336,12 @@ func (task *ReduceTask) Process(tempdir string, client Interface) error {
 
 func main() {
 	fmt.Println("Runs main")
-	m := 10
-	r := 5
+	m := 5
+	r := 2
 	source := "source.db"
 	target := "target.db"
 	tmp := os.TempDir()
+	runtime.GOMAXPROCS(1)
 
 	tempdir := filepath.Join(tmp, fmt.Sprintf("mapreduce.%d", os.Getpid()))
 	if err := os.RemoveAll(tempdir); err != nil {
@@ -422,9 +424,10 @@ func main() {
 	fmt.Printf("ReduceTask process complete\n")
 
 	// gather outputs into final target.db file
+	//filepath.Join(tempdir, reduceOutputFile(i))
 	var reduceOutputPaths []string
 	for i := 0; i < r; i++ {
-		reduceOutputPaths = append(reduceOutputPaths, filepath.Join(tempdir, reduceOutputFile(i)))
+		reduceOutputPaths = append(reduceOutputPaths, makeURL(myAddress, reduceOutputFile(i)))
 	}
 
 	targetPath := filepath.Join(".", target)
