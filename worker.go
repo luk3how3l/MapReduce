@@ -178,21 +178,22 @@ func (task *MapTask) Process(tempdir string, client Interface) error {
 	defer db.Close()
 
 	//Creating output files
-	var outputDBs []string
+	outputDBs := make([]*sql.DB, task.R)
 	for i := 0; i < task.R; i++ {
 		outputPath := filepath.Join(tempdir, mapOutputFile(task.N, i))
-		_, err := createDatabase(outputPath)
-		outputDBs = append(outputDBs, outputPath)
+		outputDB, err := createDatabase(outputPath)
 		if err != nil {
-			return fmt.Errorf("failed to create output database %s: %v", outputPath, err)
+			return fmt.Errorf("failed to open output database %s: %v", outputPath, err)
 		}
+		outputDBs[i] = outputDB
+		defer outputDB.Close()
 	}
 
 	rows, err := db.Query("SELECT key, value FROM pairs")
 	if err != nil {
 		return fmt.Errorf("error querying database: %v", err)
 	}
-	defer rows.Close()
+	defer rows.Close()	
 
 	for rows.Next() {
 		//gets next key value pair
@@ -210,19 +211,11 @@ func (task *MapTask) Process(tempdir string, client Interface) error {
 				hasher := fnv.New32()
 				hasher.Write([]byte(pair.Key))
 				r := int(hasher.Sum32() % uint32(task.R))
-
-				database, err := openDatabase(outputDBs[r])
-				if err != nil {
-					log.Printf("failed to open output database %s: %v", outputDBs[r], err)
-					database.Close()
-					continue
-				}
-				defer database.Close()
-
-				_, err = database.Exec("INSERT INTO pairs (key, value) VALUES (?, ?)", pair.Key, pair.Value)
-				if err != nil {
-					log.Printf("failed to insert pair (%s, %s): %v", pair.Key, pair.Value, err)
-				}
+ 
+ 				_, err := outputDBs[r].Exec("INSERT INTO pairs (key, value) VALUES (?, ?)", pair.Key, pair.Value)
+ 				if err != nil {
+ 					log.Printf("failed to insert pair (%s, %s): %v", pair.Key, pair.Value, err)
+ 				}
 			}
 			//signaling it's done writing
 			imgood <- true
