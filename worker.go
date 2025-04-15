@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"unicode"
@@ -201,7 +202,7 @@ func (task *MapTask) Process(tempdir string, client Interface) error {
 		}
 
 		outputChan := make(chan Pair)
-		imgood := make(chan bool)
+		imgood := make(chan bool, 5)
 		//The read parts usually fast
 		// Background goroutine to insert pairs into corresponding db
 		go func() {
@@ -287,7 +288,7 @@ func (task *ReduceTask) Process(tempdir string, client Interface) error {
 
 	// Pipe SQL rows into rawPairs channel
 	rawPairs := make(chan Pair)
-	done := make(chan bool)
+	done := make(chan bool, 5)
 
 	go func() {
 		defer close(rawPairs)
@@ -340,6 +341,7 @@ func main() {
 	source := "source.db"
 	target := "target.db"
 	tmp := os.TempDir()
+	runtime.GOMAXPROCS(1)
 
 	tempdir := filepath.Join(tmp, fmt.Sprintf("mapreduce.%d", os.Getpid()))
 	if err := os.RemoveAll(tempdir); err != nil {
