@@ -193,7 +193,7 @@ func (task *MapTask) Process(tempdir string, client Interface) error {
 	if err != nil {
 		return fmt.Errorf("error querying database: %v", err)
 	}
-	defer rows.Close()	
+	defer rows.Close()
 
 	for rows.Next() {
 		//gets next key value pair
@@ -204,25 +204,24 @@ func (task *MapTask) Process(tempdir string, client Interface) error {
 
 		outputChan := make(chan Pair, 100)
 		imgood := make(chan bool, 100)
-		//The read parts usually fast
-		// Background goroutine to insert pairs into corresponding db
+
+		// Background goroutine to insert pairs into corresponding db by read
 		go func() {
 			for pair := range outputChan {
 				hasher := fnv.New32()
 				hasher.Write([]byte(pair.Key))
 				r := int(hasher.Sum32() % uint32(task.R))
- 
- 				_, err := outputDBs[r].Exec("INSERT INTO pairs (key, value) VALUES (?, ?)", pair.Key, pair.Value)
- 				if err != nil {
- 					log.Printf("failed to insert pair (%s, %s): %v", pair.Key, pair.Value, err)
- 				}
+
+				_, err := outputDBs[r].Exec("INSERT INTO pairs (key, value) VALUES (?, ?)", pair.Key, pair.Value)
+				if err != nil {
+					log.Printf("failed to insert pair (%s, %s): %v", pair.Key, pair.Value, err)
+				}
 			}
 			//signaling it's done writing
 			imgood <- true
 		}()
 
-		// Call client.map on each key value pair
-		//The write part/ slow
+		// Call client.map on each key value pair/ it's a write
 		go func(k, v string) {
 			err := client.Map(k, v, outputChan)
 			if err != nil {
@@ -235,7 +234,7 @@ func (task *MapTask) Process(tempdir string, client Interface) error {
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("error iterating through rows: %v", err)
 	}
-	fmt.Printf("Processed task %v\n", task.N)
+	log.Printf("Processed task %v\n", task.N)
 	return nil
 }
 
@@ -323,7 +322,7 @@ func (task *ReduceTask) Process(tempdir string, client Interface) error {
 		return fmt.Errorf("row iteration error: %v", err)
 	}
 
-	fmt.Printf("Processed reduce task %v\n", task.N)
+	log.Printf("Processed reduce task %v\n", task.N)
 	return nil
 }
 
@@ -364,7 +363,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Listen error on address %s: %v", myAddress, err)
 	}
-	//I think that this takes a tcp connection and converts it into a http request
+	// this takes a tcp connection and converts it into a http request
 	go func() {
 		if err := http.Serve(listener, nil); err != nil {
 			log.Fatalf("Serve error: %v", err)
@@ -406,7 +405,7 @@ func main() {
 			reduce.SourceHosts[i] = myAddress
 		}
 	}
-	fmt.Printf("MapTask process complete\n")
+	log.Printf("MapTask process complete, Processing %d reduce tasks\n", r)
 
 	// process the reduce tasks
 	for i, task := range reduceTasks {
@@ -414,10 +413,9 @@ func main() {
 			log.Fatalf("processing reduce task %d: %v", i, err)
 		}
 	}
-	fmt.Printf("ReduceTask process complete\n")
+	log.Printf("ReduceTask process complete\n")
 
 	// gather outputs into final target.db file
-	//filepath.Join(tempdir, reduceOutputFile(i))
 	var reduceOutputPaths []string
 	for i := 0; i < r; i++ {
 		reduceOutputPaths = append(reduceOutputPaths, makeURL(myAddress, reduceOutputFile(i)))
