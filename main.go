@@ -1,5 +1,3 @@
-package mapreducez
-
 package main
 
 import (
@@ -9,25 +7,33 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math/rand"
 	"net"
 	"os"
 	"strconv"
 	"strings"
 	"time"
-
-	petname "github.com/dustinkirkland/golang-petname"
-
-	pb "chord/protocol" // Update path as needed
-
-	"google.golang.org/grpc"
+	"mapreducez"
 )
 
 var localaddress string
 
-// Find our local IP address
+// node types
+const (
+	MASTER_NODE = "master"
+	WORKER_NODE = "worker"
+)
+
+type Node struct {
+	Address    string
+	NodeType   string
+	Workers    []string              // only used by master to track worker addresses
+	MasterAddr string               // only used by workers to track their master
+	MapReduce  *mapreducez.Master   // master node's MapReduce instance
+	Worker     *mapreducez.Worker   // worker node's Worker instance
+}
+
+// find our local ip address
 func init() {
-	// Configure log package to show short filename, line number and timestamp with only time
 	log.SetFlags(log.Lshortfile | log.Ltime)
 
 	conn, err := net.Dial("udp", "8.8.8.8:80")
@@ -45,90 +51,67 @@ func init() {
 	log.Printf("found local address %s\n", localaddress)
 }
 
-// resolveAddress handles :port format by adding the local address
-func resolveAddress(address string) string {
-	if strings.HasPrefix(address, ":") {
-		return net.JoinHostPort(localaddress, address[1:])
-	} else if !strings.Contains(address, ":") {
-		return net.JoinHostPort(address, defaultPort)
-	}
-	return address
-}
-
-// StartServer starts the gRPC server for this node
-func StartServer(address string, nprime string) (*Node, error) {
-	address = resolveAddress(address)
-
+// start server based on node type (master or worker)
+func StartServer(address string, masterAddr string) (*Node, error) {
 	node := &Node{
-		Address:     address,
+		Address: address,
+	}
+
+	if masterAddr == "" {
+		// Initialize as master node
+		node.NodeType = MASTER_NODE
+		node.Workers = make([]string, 0)
 		
-	}
-
-	// Are we the first node?
-	if nprime == "" {
-		log.Print("StartServer: creating new Master")
-		node.Successors = []string{node.Address}
+		// Create MapReduce master instance
+		master := &mapreducez.Master{
+			Workers: make(map[string]*mapreducez.Worker),
+			MapTasks: make(map[int]*mapreducez.MapTask),
+			ReduceTasks: make(map[int]*mapreducez.ReduceTask),
+		}
+		node.MapReduce = master
+		
+		log.Printf("starting master node at %s", address)
 	} else {
-		log.Print("StartServer: joining existing ring using ", nprime)
-		// For now use the given address as our successor
-		nprime = resolveAddress(nprime)
-		node.Successors = []string{nprime}
-
-		// TODO: use a GetAll request to populate our bucket
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-
-		client, err := grpc.Dial(nprime, grpc.WithInsecure()) // Connect to successor
-		if err != nil {
-			log.Fatalf("StartServer: Failed to connect to successor %s: %v", nprime, err)
-		}
-		defer client.Close()
-
-		chordClient := pb.NewChordClient(client)
-		getSomeReq := &pb.GetSomeRequest{NewPredecessorAddress: node.Address}
-
-		getSomeResp, err := chordClient.GetSome(ctx, getSomeReq)
-		if err != nil {
-			log.Printf("StartServer: Failed to get key-value pairs from successor: %v", err)
-		} else {
-			node.Bucket = getSomeResp.KeyValues // Store received key-value pairs
-			log.Printf("StartServer: Populated bucket with %d key-value pairs", len(node.Bucket))
+		// Initialize as worker node
+		node.NodeType = WORKER_NODE
+		node.MasterAddr = masterAddr
+		
+		// Create worker instance
+		worker := &mapreducez.Worker{}
+		node.Worker = worker
+		
+		log.Printf("starting worker node at %s, connecting to master at %s", address, masterAddr)
+		
+		// Register with master
+		if err := registerWithMaster(node); err != nil {
+			return nil, fmt.Errorf("failed to register with master: %v", err)
 		}
 	}
-
-	// Start listening for RPC calls
-	grpcServer := grpc.NewServer()
-	pb.RegisterChordServer(grpcServer, node)
-
-	lis, err := net.Listen("tcp", node.Address)
-	if err != nil {
-		return nil, fmt.Errorf("failed to listen: %v", err)
-	}
-
-	// Start server in goroutine
-	log.Printf("Starting Chord node server on %s", node.Address)
-	go func() {
-		if err := grpcServer.Serve(lis); err != nil {
-			log.Fatalf("failed to serve: %v", err)
-		}
-	}()
-
-	// Start background tasks
-	go func() {
-		// ping every 1 second
-		for {
-			time.Sleep(time.Second / 3)
-			node.stabilize()
-
-			time.Sleep(time.Second / 3)
-			nextFinger = node.fixFingers(nextFinger)
-
-			time.Sleep(time.Second / 3)
-			node.checkPredecessor()
-		}
-	}()
 
 	return node, nil
+}
+
+// register worker with master node
+func registerWithMaster(node *Node) error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	// Connect to master's RPC server
+	conn, err := net.Dial("tcp", node.MasterAddr)
+	if err != nil {
+		return fmt.Errorf("failed to connect to master: %v", err)
+	}
+	defer conn.Close()
+
+	// Register worker with master
+	client := mapreducez.NewRPCClient(conn)
+	err = client.Call("Master.RegisterWorker", node.Address, nil)
+	if err != nil {
+		return fmt.Errorf("failed to register with master: %v", err)
+	}
+
+	log.Printf("successfully registered with master at %s", node.MasterAddr)
+	return nil
 }
 
 // RunShell provides an interactive command shell
@@ -152,184 +135,80 @@ func RunShell(node *Node) {
 			continue
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-
 		switch parts[0] {
 		case "help":
-			fmt.Println("Available commands:")
-			fmt.Println("  help              - Show this help message")
-			fmt.Println("  ping <address>    - Ping another node")
-			fmt.Println("                      (You can use :port for localhost)")
-			fmt.Println("  putalot 			=- cheat is put me : to auto fill")
-			fmt.Println("  put <key> <value>  - Store a key-value pair on a node")
-			fmt.Println("  get <key>          - Get a value for a key from a node")
-			fmt.Println("  delete <key>       - Delete a key from a node")
-			fmt.Println("  getall <address>            - Get all key-value pairs from a node")
-			fmt.Println("  dump              - Display info about the current node")
-			fmt.Println("  quit              - Exit the program")
+			printHelp(node.NodeType)
 
-		case "ping":
-			if len(parts) < 2 {
-				fmt.Println("Usage: ping <address>")
+		case "status":
+			if node.NodeType == MASTER_NODE {
+				fmt.Printf("Master node at %s\n", node.Address)
+				fmt.Printf("Connected workers: %v\n", node.Workers)
+			} else {
+				fmt.Printf("Worker node at %s\n", node.Address)
+				fmt.Printf("Connected to master: %s\n", node.MasterAddr)
+			}
+
+		case "start":
+			if node.NodeType != MASTER_NODE {
+				fmt.Println("Only master node can start MapReduce jobs")
 				continue
 			}
-
-			err := PingNode(ctx, parts[1])
-			if err != nil {
-				fmt.Printf("Ping failed: %v\n", err)
-			} else {
-				fmt.Println("Ping successful")
-			}
-
-		case "put":
 			if len(parts) < 3 {
-				fmt.Println("Usage: put <key> <value>")
+				fmt.Println("Usage: start <input_file> <num_reduce_tasks>")
+				continue
+			}
+			
+			inputFile := parts[1]
+			numReduceTasks, err := strconv.Atoi(parts[2])
+			if err != nil {
+				fmt.Printf("Invalid number of reduce tasks: %v\n", err)
 				continue
 			}
 
-			target, err := find(hash(parts[1]), node.Address)
+			err = node.MapReduce.MasterMain(inputFile, numReduceTasks)
 			if err != nil {
-				fmt.Printf("Find failed: %v\n", err)
-				continue
-			}
-
-			err = PutKeyValue(ctx, parts[1], parts[2], target)
-			if err != nil {
-				fmt.Printf("Put failed: %v\n", err)
+				fmt.Printf("MapReduce job failed: %v\n", err)
 			} else {
-				fmt.Printf("Put successful: %s -> %s\n", parts[1], parts[2])
+				fmt.Println("MapReduce job completed successfully")
 			}
-		case "putalot":
-			if len(parts) < 1 {
-				fmt.Println("Usage: putalot")
-				continue
-			}
-
-			rand.Seed(time.Now().UnixNano()) // Seed the random number generator
-			words := make([]string, 100)
-
-			for i := range words {
-				words[i] = petname.Generate(1, "-") // Generates a single random word
-			}
-			knumbers := make([]int, 100) // Create a slice for 50 numbers
-
-			// Generate random numbers between 1000 and 99999 (to ensure 4 or 5 digits)
-			for i := range knumbers {
-				knumbers[i] = rand.Intn(90000) + 1000
-			}
-			//fmt.Printf("the list %v", knumbers)
-
-			for k := 0; k < len(knumbers); k++ {
-
-				target, err := find(hash(words[k]), node.Address)
-				if err != nil {
-					fmt.Printf("Find failed: %v\n", err)
-					continue
-				}
-
-				errr := PutKeyValue(ctx, words[k], strconv.Itoa(knumbers[k]), target)
-				if errr != nil {
-					fmt.Printf("Put failed: %v\n", errr)
-				} else {
-					fmt.Printf("Put successful: %s -> %s\n", words[k], strconv.Itoa(knumbers[k]))
-				}
-			}
-
-		case "get":
-			if len(parts) < 2 {
-				fmt.Println("Usage: get <key>")
-				continue
-			}
-
-			target, err := find(hash(parts[1]), node.Address)
-			if err != nil {
-				fmt.Printf("Find failed: %v\n", err)
-				continue
-			}
-
-			value, err := GetValue(ctx, parts[1], target)
-			if err != nil {
-				fmt.Printf("Get failed: %v\n", err)
-			} else if value == "" {
-				fmt.Printf("Key '%s' not found\n", parts[1])
-			} else {
-				fmt.Printf("%s -> %s\n", parts[1], value)
-			}
-
-		case "delete":
-			if len(parts) < 2 {
-				fmt.Println("Usage: delete <key>")
-				continue
-			}
-
-			target, err := find(hash(parts[1]), node.Address)
-			if err != nil {
-				fmt.Printf("Find failed: %v\n", err)
-				continue
-			}
-
-			err = DeleteKey(ctx, parts[1], target)
-			if err != nil {
-				fmt.Printf("Delete failed: %v\n", err)
-			} else {
-				fmt.Printf("Delete request for key '%s' completed\n", parts[1])
-			}
-
-		case "getall":
-			if len(parts) < 2 {
-				fmt.Println("Usage: getall <address>")
-				continue
-			}
-
-			keyValues, err := GetAllKeyValues(ctx, parts[1])
-			if err != nil {
-				fmt.Printf("GetAll failed: %v\n", err)
-			} else {
-				if len(keyValues) == 0 {
-					fmt.Println("No key-value pairs found")
-				} else {
-					fmt.Println("Key-value pairs:")
-					for k, v := range keyValues {
-						fmt.Printf("  %s -> %s\n", k, v)
-					}
-				}
-			}
-
-		case "dump":
-			node.dump()
 
 		case "quit":
-			fmt.Println("Exiting...")
-			//TODO: add putall here to give nodes to sucessor before quitting
-			successor := node.Successors[0]
-			log.Printf("Leave: Transferring %d key-value pairs to successor %s", len(node.Bucket), successor)
-
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
-
-			// Call PutAll on the successor
-			conn, err := grpc.Dial(successor, grpc.WithInsecure())
-			if err != nil {
-				log.Printf("Leave: Failed to connect to successor %s: %v", successor, err)
-				return
+			if node.NodeType == MASTER_NODE {
+				// Notify all workers to shut down
+				for _, workerAddr := range node.Workers {
+					notifyWorkerShutdown(workerAddr)
+				}
 			}
-
-			client := pb.NewChordClient(conn)
-
-			_, err = client.PutAll(ctx, &pb.PutAllRequest{KeyValues: node.Bucket})
-			if err != nil {
-				log.Printf("Leave: Failed to transfer data to successor %s: %v", successor, err)
-				return
-			}
-
-			log.Println("Leave: Data successfully transferred, shutting down.")
-
 			return
 
 		default:
 			fmt.Println("Unknown command. Type 'help' for available commands.")
 		}
+	}
+}
+
+func printHelp(nodeType string) {
+	fmt.Println("Available commands:")
+	fmt.Println("  help              - Show this help message")
+	fmt.Println("  status            - Show node status")
+	if nodeType == MASTER_NODE {
+		fmt.Println("  start <input> <R>  - Start MapReduce job with input file and R reduce tasks")
+	}
+	fmt.Println("  quit              - Exit the program")
+}
+
+func notifyWorkerShutdown(workerAddr string) {
+	conn, err := net.Dial("tcp", workerAddr)
+	if err != nil {
+		log.Printf("Failed to connect to worker %s for shutdown: %v", workerAddr, err)
+		return
+	}
+	defer conn.Close()
+
+	client := mapreducez.NewRPCClient(conn)
+	err = client.Call("Worker.Shutdown", struct{}{}, nil)
+	if err != nil {
+		log.Printf("Failed to notify worker %s for shutdown: %v", workerAddr, err)
 	}
 }
 
@@ -340,10 +219,10 @@ func main() {
 
 	joinCmd := flag.NewFlagSet("join", flag.ExitOnError)
 	joinPort := joinCmd.Int("port", 3410, "Port to listen on")
-	joinAddr := joinCmd.String("addr", "", "Address of existing node")
+	masterAddr := joinCmd.String("master", "", "Address of master node")
 
 	if len(os.Args) < 2 {
-		fmt.Println("Expected 'create' or 'join' subcommand")
+		fmt.Println("Expected 'create' (for master) or 'join' (for worker) subcommand")
 		os.Exit(1)
 	}
 
@@ -358,11 +237,11 @@ func main() {
 		}
 
 		address = fmt.Sprintf(":%d", *createPort)
-		node, err = StartServer(address, "")
+		node, err = StartServer(address, "") // Empty master address means this is master
 		if err != nil {
-			log.Fatalf("Failed to create node: %v", err)
+			log.Fatalf("Failed to create master node: %v", err)
 		}
-		log.Printf("Created new ring with node at %s", node.Address)
+		log.Printf("Created master node at %s", node.Address)
 
 	case "join":
 		err := joinCmd.Parse(os.Args[2:])
@@ -370,19 +249,19 @@ func main() {
 			log.Fatal(err)
 		}
 
-		if *joinAddr == "" {
-			log.Fatal("Join requires an address of an existing node")
+		if *masterAddr == "" {
+			log.Fatal("Worker nodes require master address (-master flag)")
 		}
 
 		address = fmt.Sprintf(":%d", *joinPort)
-		node, err = StartServer(address, *joinAddr)
+		node, err = StartServer(address, *masterAddr)
 		if err != nil {
-			log.Fatalf("Failed to join ring: %v", err)
+			log.Fatalf("Failed to create worker node: %v", err)
 		}
-		log.Printf("Joined ring with node at %s", node.Address)
+		log.Printf("Created worker node at %s", node.Address)
 
 	default:
-		fmt.Println("Expected 'create' or 'join' subcommand")
+		fmt.Println("Expected 'create' (for master) or 'join' (for worker) subcommand")
 		os.Exit(1)
 	}
 
