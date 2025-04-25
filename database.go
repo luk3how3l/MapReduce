@@ -1,4 +1,4 @@
-package main
+package mapreducez
 
 import (
 	"database/sql"
