@@ -49,3 +49,9 @@ Notes from Russ:
 
 to find intermediade code-
 	find / -name "map*.db" 2>/dev/null
+
+
+	sqlite3 target.db
+	select key, value from pairs order by value+0 desc limit 20;
+
+	sqlite3 austen-out.db
