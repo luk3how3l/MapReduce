@@ -28,10 +28,10 @@ const (
 type Node struct {
 	Address    string
 	NodeType   string
-	Workers    []string              // only used by master to track worker addresses
-	MasterAddr string               // only used by workers to track their master
-	MapReduce  *mapreducez.Master   // master node's MapReduce instance
-	Worker     *mapreducez.Worker   // worker node's Worker instance
+	Workers    map[string]string              // map of worker addresses to their ports
+	MasterAddr string                         // only used by workers to track their master
+	MapReduce  *mapreducez.Master            // master node's MapReduce instance
+	Worker     *mapreducez.Worker            // worker node's Worker instance
 }
 
 // find our local ip address
@@ -65,7 +65,7 @@ func StartServer(address string, masterAddr string) (*Node, error) {
 		// Initialize as master node
 		log.Printf("Initializing as master node")
 		node.NodeType = MASTER_NODE
-		node.Workers = make([]string, 0)
+		node.Workers = make(map[string]string)
 		
 		// Create MapReduce master instance
 		master := &mapreducez.Master{
@@ -74,6 +74,7 @@ func StartServer(address string, masterAddr string) (*Node, error) {
 			MapTasks: make(map[int]*mapreducez.MapTask),
 			ReduceTasks: make(map[int]*mapreducez.ReduceTask),
 			Client: &mapreducez.Client{},
+			
 		}
 		node.MapReduce = master
 
@@ -204,7 +205,7 @@ func RunShell(node *Node) {
 		case "quit":
 			if node.NodeType == MASTER_NODE {
 				// Notify all workers to shut down
-				for _, workerAddr := range node.Workers {
+				for workerAddr := range node.Workers {
 					notifyWorkerShutdown(workerAddr)
 				}
 			}
