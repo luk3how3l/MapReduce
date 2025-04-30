@@ -3,7 +3,6 @@ package mapreducez
 import (
 	"fmt"
 	"log"
-	"net/rpc"
 	"net"
 	"net/http"
 	"os"
@@ -21,18 +20,28 @@ master metadata needs:
 master stores the metadata of location and size of r intermediate files
 updates the metadata as map task is complete. 
 */
+const (
+	numMapTasks = 10 // Default number of map tasks
+)
 
-
-type Master struct {
-	mu sync.Mutex
-	workers map[string]*Worker
-	mapTasks map[int]*MapTask   //map of the completion status of each map task
-	reduceTasks map[int]*ReduceTask //map of the completion status of each reduce task
+type MapTask struct {
+	M, R       int    // total number of map and reduce tasks
+	N          int    // map task number, 0-based
+	SourceHost string // address of host with map input file
 }
 
-type Interface interface {
-	Map(key, value string, output chan<- Pair) error
-	Reduce(key string, values <-chan string, output chan<- Pair) error
+type ReduceTask struct {
+	M, R        int      // total number of map and reduce tasks
+	N           int      // reduce task number, 0-based
+	SourceHosts []string // addresses of map workers
+}
+
+type Master struct {
+	Mu           sync.Mutex
+	Workers      map[string]*Worker
+	MapTasks     map[int]*MapTask
+	ReduceTasks  map[int]*ReduceTask
+	Client       Interface
 }
 
 /*
@@ -53,14 +62,9 @@ when everything is finishing up an master reassign map tasks if there is an tail
 
 // master pseudocode
 
-func MasterMain(inputFile string, numReduceTasks int) error {
-	// initialize master state
-	master := &Master{
-		workers: make(map[string]*Worker),
-		mapTasks: make(map[int]*MapTask),
-		reduceTasks: make(map[int]*ReduceTask),
-	}
-
+func (m *Master) MasterMain(inputFile string, numReduceTasks int) error {
+	log.Printf("Starting MapReduce job with input file %s and %d reduce tasks", inputFile, numReduceTasks)
+	
 	// === initialization ===
 	// create temp directory for intermediate files
 	tempdir := filepath.Join(os.TempDir(), fmt.Sprintf("mapreduce.%d", os.Getpid()))
@@ -91,7 +95,7 @@ func MasterMain(inputFile string, numReduceTasks int) error {
 	// === generate tasks ===
 	// create map tasks
 	for i := 0; i < numMapTasks; i++ {
-		master.mapTasks[i] = &MapTask{
+		m.MapTasks[i] = &MapTask{
 			M: numMapTasks,
 			R: numReduceTasks,
 			N: i,
@@ -101,7 +105,7 @@ func MasterMain(inputFile string, numReduceTasks int) error {
 
 	// create reduce tasks
 	for i := 0; i < numReduceTasks; i++ {
-		master.reduceTasks[i] = &ReduceTask{
+		m.ReduceTasks[i] = &ReduceTask{
 			M: numMapTasks,
 			R: numReduceTasks,
 			N: i,
@@ -111,38 +115,38 @@ func MasterMain(inputFile string, numReduceTasks int) error {
 
 	// === map phase ===
 	var mapWG sync.WaitGroup
-	for id, task := range master.mapTasks {
+	for id, task := range m.MapTasks {
 		mapWG.Add(1)
 		go func(taskID int, mapTask *MapTask) {
 			defer mapWG.Done()
 			
 			// assign task to available worker
-			worker := master.getIdleWorker()
-			if err := worker.Process(tempdir, mapTask); err != nil {
+			worker := m.getIdleWorker()
+			if err := worker.Process(tempdir, mapTask, m.Client); err != nil {
 				log.Printf("map task %d failed: %v", taskID, err)
 				// handle failure - possibly reassign task
 				return
 			}
 
 			// update reduce tasks with this map task's output location
-			master.mu.Lock()
-			for _, reduceTask := range master.reduceTasks {
+			m.Mu.Lock()
+			for _, reduceTask := range m.ReduceTasks {
 				reduceTask.SourceHosts[taskID] = worker.Address
 			}
-			master.mu.Unlock()
+			m.Mu.Unlock()
 		}(id, task)
 	}
 	mapWG.Wait()
 
 	// === reduce phase ===
 	var reduceWG sync.WaitGroup
-	for id, task := range master.reduceTasks {
+	for id, task := range m.ReduceTasks {
 		reduceWG.Add(1)
 		go func(taskID int, reduceTask *ReduceTask) {
 			defer reduceWG.Done()
 
-			worker := master.getIdleWorker()
-			if err := worker.Process(tempdir, reduceTask); err != nil {
+			worker := m.getIdleWorker()
+			if err := worker.Process(tempdir, reduceTask, m.Client); err != nil {
 				log.Printf("reduce task %d failed: %v", taskID, err)
 				// handle failure - possibly reassign task
 				return
@@ -166,22 +170,30 @@ func MasterMain(inputFile string, numReduceTasks int) error {
 	}
 
 	// cleanup
-	master.notifyWorkersShutdown()
+	m.notifyWorkersShutdown()
 	return nil
 }
 
 // helper methods for master
 func (m *Master) getIdleWorker() *Worker {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	// find an idle worker or wait for one to become available
-	// implementation details here
+	m.Mu.Lock()
+	defer m.Mu.Unlock()
+	
+	for _, worker := range m.Workers {
+		if worker.IsIdle {
+			worker.IsIdle = false
+			return worker
+		}
+	}
+	return nil
 }
 
 func (m *Master) notifyWorkersShutdown() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, worker := range m.workers {
-		// send shutdown signal to each worker
+	m.Mu.Lock()
+	defer m.Mu.Unlock()
+	
+	for _, worker := range m.Workers {
+		// TODO: Implement worker shutdown notification
+		log.Printf("Notifying worker %s to shutdown", worker.Address)
 	}
 }

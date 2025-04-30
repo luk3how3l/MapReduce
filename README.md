@@ -17,6 +17,31 @@ Setup:
 Go build 
 Go init
 
+Setup: 
+    go mod init mapreduce
+    go mod tidy
+
+
+Goal PArt 2: 
+
+bash commands to start up main.go 
+    go run main.go create -port 3410
+    go run main.go join -port 3411 -master localhost:3410
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 Goal for Part 1:
     Get Map Task -DONE
     Map Handler, Reduce Handler
@@ -35,9 +60,6 @@ End Goal:
 Notes from Russ:
     write to output channel for waiting. we have to many go routines. 
     open once like merge database. 
-
-
-
     maek a group channel layout 
     group channel is key- channel of pairs
 

@@ -6,14 +6,11 @@ import (
 	"hash/fnv"
 	"log"
 	"net"
-	"net/http"
-	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"unicode"
-
+	"sync"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -25,18 +22,6 @@ Request a job from the master.
 Process each job using the code from part 2.
 Shut down and clean up when finished.
 */
-
-type MapTask struct {
-	M, R       int    // total number of map and reduce tasks
-	N          int    // map task number, 0-based
-	SourceHost string // address of host with map input file
-}
-
-type ReduceTask struct {
-	M, R        int      // total number of map and reduce tasks
-	N           int      // reduce task number, 0-based
-	SourceHosts []string // addresses of map workers
-}
 
 type Pair struct {
 	Key   string
@@ -51,6 +36,23 @@ type KeyGroup struct {
 type Interface interface {
 	Map(key, value string, output chan<- Pair) error
 	Reduce(key string, values <-chan string, output chan<- Pair) error
+}
+
+type Worker struct {
+	Mu      sync.Mutex
+	Address string
+	IsIdle  bool
+}
+
+func (w *Worker) Process(tempdir string, task interface{}, client Interface) error {
+	switch t := task.(type) {
+	case *MapTask:
+		return t.Process(tempdir, client)
+	case *ReduceTask:
+		return t.Process(tempdir, client)
+	default:
+		return fmt.Errorf("unknown task type: %T", task)
+	}
 }
 
 func mapSourceFile(m int) string       { return fmt.Sprintf("map_%d_source.db", m) }
@@ -326,6 +328,8 @@ func (task *ReduceTask) Process(tempdir string, client Interface) error {
 	return nil
 }
 
+
+/*
 func main() {
 	fmt.Println("Runs main")
 	m := 10
@@ -432,3 +436,4 @@ func main() {
 
 	log.Printf("Successfully wrote final output to %s", targetPath)
 }
+*/
