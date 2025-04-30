@@ -1,13 +1,16 @@
 package main
 
 import (
+	
 	"log"
 	"net"
+	"net/rpc"
 	"sync"
 
-	"github.com/your-project/mapreducez"
+	"mapreducez"
 )
 
+//"github.com/your-project/mapreducez"
 type Master struct {
 	Workers []*mapreducez.Worker
 	mu      sync.Mutex
@@ -17,7 +20,7 @@ func (m *Master) RegisterWorker(worker *mapreducez.Worker, reply *struct{}) erro
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	
-	log.Printf("Registering new worker: %s", worker.Addr)
+	log.Printf("Registering new worker: %s", worker.Address)
 	m.Workers = append(m.Workers, worker)
 	return nil
 }
@@ -28,12 +31,11 @@ func main() {
 		Workers: make([]*mapreducez.Worker, 0),
 	}
 
-	// Start RPC server
-	server := mapreducez.NewRPCServer()
-	server.Register("Master", master)
+	// Register RPC service
+	rpc.Register(master)
 
 	// Start listening for worker connections
-	listener, err := net.Listen("tcp", ":3410")
+	listener, err := net.Listen("tcp", "localhost:3410")
 	if err != nil {
 		log.Fatalf("Failed to start RPC server: %v", err)
 	}
@@ -48,6 +50,6 @@ func main() {
 			log.Printf("Failed to accept connection: %v", err)
 			continue
 		}
-		go server.ServeConn(conn)
+		go rpc.ServeConn(conn)
 	}
 } 

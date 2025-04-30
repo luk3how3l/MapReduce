@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/rpc"
 	"os"
 	"strconv"
 	"strings"
@@ -75,6 +76,25 @@ func StartServer(address string, masterAddr string) (*Node, error) {
 			Client: &mapreducez.Client{},
 		}
 		node.MapReduce = master
+
+		// Register RPC service
+		rpc.Register(master)
+
+		// Start RPC server
+		listener, err := net.Listen("tcp", address)
+		if err != nil {
+			return nil, fmt.Errorf("failed to start RPC server: %v", err)
+		}
+		go func() {
+			for {
+				conn, err := listener.Accept()
+				if err != nil {
+					log.Printf("Failed to accept connection: %v", err)
+					continue
+				}
+				go rpc.ServeConn(conn)
+			}
+		}()
 		
 		log.Printf("Master node initialized at %s", address)
 	} else {
@@ -84,11 +104,7 @@ func StartServer(address string, masterAddr string) (*Node, error) {
 		node.MasterAddr = masterAddr
 		
 		// Create worker instance
-		worker := &mapreducez.Worker{
-			Mu: sync.Mutex{},
-			Address: address,
-			IsIdle: true,
-		}
+		worker := mapreducez.NewWorker(address)
 		node.Worker = worker
 		
 		log.Printf("Worker node initialized at %s, connecting to master at %s", address, masterAddr)
@@ -106,18 +122,15 @@ func StartServer(address string, masterAddr string) (*Node, error) {
 func registerWithMaster(node *Node) error {
 	_, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	//ctx 
+	
 	log.Printf("Attempting to register with master at %s", node.MasterAddr)
 
 	// Connect to master's RPC server
-	conn, err := net.Dial("tcp", node.MasterAddr)
+	client, err := rpc.Dial("tcp", node.MasterAddr)
 	if err != nil {
 		return fmt.Errorf("failed to connect to master: %v", err)
 	}
-	defer conn.Close()
-
-	// Create RPC client
-	client := mapreducez.NewRPCClient(conn)
+	defer client.Close()
 	
 	// Register worker with master
 	var reply struct{}

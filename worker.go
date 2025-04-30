@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
-	"sync"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -39,9 +38,17 @@ type Interface interface {
 }
 
 type Worker struct {
-	Mu      sync.Mutex
 	Address string
 	IsIdle  bool
+	done    chan struct{}
+}
+
+func NewWorker(address string) *Worker {
+	return &Worker{
+		Address: address,
+		IsIdle:  true,
+		done:    make(chan struct{}),
+	}
 }
 
 func (w *Worker) Process(tempdir string, task interface{}, client Interface) error {

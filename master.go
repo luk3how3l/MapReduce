@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"net/rpc"
 )
 
 /* 
@@ -81,6 +82,16 @@ func (m *Master) MasterMain(inputFile string, numReduceTasks int) error {
 	if err := splitDatabase(inputFile, paths); err != nil {
 		return fmt.Errorf("failed to split input: %v", err)
 	}
+	//insert an rpc listen for if a worker registers
+	go func() {
+		rpc.Register(m)
+		rpc.HandleHTTP()
+		listener, err := net.Listen("tcp", ":3410")
+		if err != nil {
+			log.Fatalf("failed to start RPC server: %v", err)
+		}
+		go http.Serve(listener, nil)
+	}()
 
 	// === start http server ===
 	// start http server to serve map input chunks
@@ -196,4 +207,13 @@ func (m *Master) notifyWorkersShutdown() {
 		// TODO: Implement worker shutdown notification
 		log.Printf("Notifying worker %s to shutdown", worker.Address)
 	}
+}
+
+func (m *Master) RegisterWorker(worker *Worker, reply *struct{}) error {
+	m.Mu.Lock()
+	defer m.Mu.Unlock()
+	
+	log.Printf("Registering new worker: %s", worker.Address)
+	m.Workers[worker.Address] = worker
+	return nil
 }
