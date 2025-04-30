@@ -28,6 +28,9 @@ bash commands to start up main.go
     go run main.go create -port 3410
     go run main.go join -port 3411 -master localhost:3410
 
+    go run main.go create -port=3410
+    go run main.go join -port=3410 -master=localhost:3410
+
 
 
 
